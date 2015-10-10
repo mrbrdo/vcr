@@ -169,6 +169,10 @@ module VCR
     #  @param value [#parse] sets the uri_parser
     attr_accessor :uri_parser
 
+    # The maximum number of seconds to wait to obtain the request mutex in a
+    # multi-threaded environment.
+    attr_accessor :max_thread_wait
+
     # Registers a request matcher for later use.
     #
     # @example
@@ -392,16 +396,16 @@ module VCR
         "VCR::Configuration#around_http_request requires fibers, " +
         "which are not available on your ruby intepreter."
     else
+      mutex = Mutex.new
       fibers = {}
       hook_allowed, hook_decaration = false, caller.first
       before_http_request(*filters) do |request|
         hook_allowed = true
-        fiber = start_new_fiber_for(request, block)
-        fibers[Thread.current] = fiber
+        start_new_fiber_for(request, fibers, mutex, block)
       end
 
       after_http_request(lambda { hook_allowed }) do |request, response|
-        fiber = fibers.delete(Thread.current)
+        fiber = mutex.synchronize { fibers.delete(Thread.current) }
         resume_fiber(fiber, response, hook_decaration)
       end
     end
@@ -494,6 +498,7 @@ module VCR
       self.uri_parser = URI
       self.query_parser = CGI.method(:parse)
       self.debug_logger = nil
+      self.max_thread_wait = 30
 
       register_built_in_hooks
     end
@@ -508,16 +513,25 @@ module VCR
 
     def resume_fiber(fiber, response, hook_declaration)
       fiber.resume(response)
-    rescue FiberError
+    rescue FiberError => ex
       raise Errors::AroundHTTPRequestHookError.new \
-        "Your around_http_request hook declared at #{hook_declaration}" +
-        " must call #proceed on the yielded request but did not."
+        "Your around_http_request hook declared at #{hook_declaration}" \
+        " must call #proceed on the yielded request but did not. " \
+        "(actual error: #{ex.class}: #{ex.message})"
     end
 
-    def start_new_fiber_for(request, block)
-      Fiber.new(&block).tap do |fiber|
-        fiber.resume(Request::FiberAware.new(request))
+    def start_new_fiber_for(request, fibers, mutex, proc)
+      fiber = Fiber.new do |*args, &block|
+        begin
+          proc.call(*args, &block)
+        rescue StandardError => ex
+          STDERR.puts "Your around_http_request hook raised an error: " \
+            "#{ex.class}: #{ex.message}"
+          raise
+        end
       end
+      mutex.synchronize { fibers[Thread.current] = fiber }
+      fiber.resume(Request::FiberAware.new(request))
     end
 
     def tag_filter_from(tag)

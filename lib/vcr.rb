@@ -21,6 +21,8 @@ module VCR
   include Errors
 
   extend self
+  CassetteMutex = Mutex.new
+  MainThread = Thread.current
 
   autoload :CucumberTags,       'vcr/test_frameworks/cucumber'
   autoload :InternetConnection, 'vcr/util/internet_connection'
@@ -256,13 +258,14 @@ module VCR
                                 "You must eject it before you can turn VCR off."
     end
 
-    @ignore_cassettes = options[:ignore_cassettes]
+    @ignore_cassettes ||= { MainThread => false }
+    @ignore_cassettes[Thread.current] = options[:ignore_cassettes]
     invalid_options = options.keys - [:ignore_cassettes]
     if invalid_options.any?
       raise ArgumentError.new("You passed some invalid options: #{invalid_options.inspect}")
     end
 
-    @turned_off = true
+    set_turned_off(true)
   end
 
   # Turns on VCR, if it has previously been turned off.
@@ -271,7 +274,7 @@ module VCR
   # @see #turned_off
   # @see #turned_on?
   def turn_on!
-    @turned_off = false
+    set_turned_off(false)
   end
 
   # @return whether or not VCR is turned on
@@ -281,7 +284,12 @@ module VCR
   # @see #turn_off!
   # @see #turned_off
   def turned_on?
-    !@turned_off
+    return true unless @turned_off
+    if @turned_off.key?(Thread.current)
+      !@turned_off[Thread.current]
+    else
+      !@turned_off[MainThread]
+    end
   end
 
   # @private
@@ -293,7 +301,7 @@ module VCR
   # @private
   def real_http_connections_allowed?
     return current_cassette.recording? if current_cassette
-    !!(configuration.allow_http_connections_when_no_cassette? || @turned_off)
+    !!(configuration.allow_http_connections_when_no_cassette? || !turned_on?)
   end
 
   # @return [RequestMatcherRegistry] the request matcher registry
@@ -331,17 +339,25 @@ module VCR
 
 private
 
+  def set_turned_off(value)
+    @turned_off ||= { MainThread => false }
+    @turned_off[Thread.current] = value
+  end
+
   def ignore_cassettes?
-    @ignore_cassettes
+    return [] unless @ignore_cassettes
+    if @ignore_cassettes.key?(Thread.current)
+      @ignore_cassettes[Thread.current]
+    else
+      @ignore_cassettes[MainThread]
+    end
   end
 
   def cassettes
-    @cassettes ||= []
-  end
+    @cassettes ||= { MainThread => [] }
+    c = @cassettes[Thread.current]
+    return c if c
 
-  def initialize_ivars
-    @turned_off = false
+    @cassettes[Thread.current] = @cassettes[MainThread].dup
   end
-
-  initialize_ivars # to avoid warnings
 end
