@@ -83,13 +83,17 @@ module VCR
     def record_http_interaction(interaction)
       VCR::CassetteMutex.synchronize do
         log "Recorded HTTP interaction #{request_summary(interaction.request)} => #{response_summary(interaction.response)}"
-        new_recorded_interactions << interaction
+        new_recorded_interactions(false) << interaction
       end
     end
 
     # @private
-    def new_recorded_interactions
-      @new_recorded_interactions ||= []
+    def new_recorded_interactions(sync = true)
+      if sync
+        VCR::CassetteMutex.synchronize { new_recorded_interactions(false) }
+      else
+        @new_recorded_interactions ||= []
+      end
     end
 
     # @return [String] The file for this cassette.
